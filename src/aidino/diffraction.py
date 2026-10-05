@@ -313,6 +313,21 @@ class BraggCoherentDiffraction:
         # density grows, so bilinear interpolation can resolve speckles finer
         # than the unpadded fringe spacing). F.pad keeps the chain differentiable.
         O_G_grid = O_G.view(batch_size, n_sc1, n_sc2, n_sc3)
+
+        # The FFT origin is placed at the supercell s_c nearest the object's
+        # weighted center, so that the transform interpolated in step 5 is free
+        # of the linear phase ramp exp(-iΔq·R_c) of an off-origin object; that
+        # phase is applied analytically per detector pixel in step 6. s_c is an
+        # integer index, computed without gradients.
+        with torch.no_grad():
+            weight = O_G_grid.abs().sum(dim=0)                       # [n_sc1, n_sc2, n_sc3]
+            index_axes = [torch.arange(n, dtype=weight.dtype, device=device) for n in (n_sc1, n_sc2, n_sc3)]
+            center_index = [
+                int(torch.round((weight.sum(dim=tuple(a for a in range(3) if a != axis)) * index_axes[axis]).sum()
+                                / weight.sum().clamp_min(torch.finfo(weight.dtype).tiny)))
+                for axis in range(3)
+            ]
+
         if M > 1:
             # F.pad's pad tuple iterates last dim → first dim.
             O_G_grid = F.pad(
@@ -321,6 +336,9 @@ class BraggCoherentDiffraction:
                  0, (M - 1) * n_sc2,
                  0, (M - 1) * n_sc1),
             )
+        # Circular shift of s_c to index 0, exact for the periodic DFT: indices
+        # below s_c occupy the end of the zero-padded grid as negative positions.
+        O_G_grid = torch.roll(O_G_grid, shifts=[-c for c in center_index], dims=(-3, -2, -1))
 
         # 3D FFT, DC bin centered via fftshift.
         # A_grid shape: [batch_size, M·n_sc1, M·n_sc2, M·n_sc3] complex
@@ -339,9 +357,14 @@ class BraggCoherentDiffraction:
         delta_q = q_vectors - bragg_vector                          # [..., 3]
         k_norm = torch.matmul(delta_q, A_sc.T) / torch.pi           # [..., 3]
 
-        # 4. Reorder to (x, y, z) = (k3, k2, k1) for grid_sample's 5D convention
-        # (W axis ↔ x coord). grid_5d shape: [batch_size, 1, 1, n_pixels, 3].
-        grid_coords = k_norm[..., [2, 1, 0]]
+        # 4. Convert k_norm to grid_sample coordinates and reorder to (x, y, z) =
+        # (k3, k2, k1) for its 5D convention (W axis ↔ x coord). After fftshift,
+        # Δq on an axis of N bins lies at index N // 2 + k_norm·N/2, and
+        # grid_sample with align_corners=True reads index (x + 1)(N - 1)/2.
+        # grid_5d shape: [batch_size, 1, 1, n_pixels, 3].
+        n_bins = torch.tensor([M * n_sc1, M * n_sc2, M * n_sc3], dtype=dtype, device=device)
+        k_grid = (2 * torch.div(n_bins, 2, rounding_mode='floor') + n_bins * k_norm) / (n_bins - 1) - 1
+        grid_coords = k_grid[..., [2, 1, 0]]
         n_pixels = grid_coords.shape[:-1].numel()
         grid_5d = grid_coords.reshape(1, 1, 1, n_pixels, 3).expand(batch_size, -1, -1, -1, -1)
 
@@ -358,10 +381,14 @@ class BraggCoherentDiffraction:
             A_sampled[:, 0, 0, 0, :], A_sampled[:, 1, 0, 0, :],
         )                                                           # [batch_size, n_pixels]
 
-        # 6. Apply global position phase shift exp(-iq·R_g) per detector pixel.
+        # 6. Apply the origin phase exp(-iΔq·R_c), with R_c = s_c · A_sc the lab
+        # position of the FFT origin, and the global position phase shift
+        # exp(-iq·R_g), per detector pixel.
         q_flat = q_vectors.reshape(-1, 3)
+        R_c = torch.tensor(center_index, dtype=dtype, device=device) @ A_sc
+        center_phase = torch.exp(-1j * torch.matmul(delta_q.reshape(-1, 3), R_c))
         global_phase = torch.exp(-1j * torch.matmul(q_flat, self.crystal.position))
-        amplitude = amplitude * global_phase.unsqueeze(0)
+        amplitude = amplitude * (center_phase * global_phase).unsqueeze(0)
 
         # 7. Reshape to [batch_size, *q_vectors.shape[:-1]].
         return amplitude.view(batch_size, *q_vectors.shape[:-1])
