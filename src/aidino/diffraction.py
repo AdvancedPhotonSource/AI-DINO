@@ -282,11 +282,10 @@ class BraggCoherentDiffraction:
         fft_oversampling : int — zero-pad the supercell grid by this factor per
             axis before the FFT so the bin spacing becomes M× finer in Δq.
             Required because bilinear interpolation can't resolve fringes
-            narrower than one bin. Set M ≥ max(2·ceil(β), 8) where β is the
-            BCDI oversampling ratio (Detector.calculate_oversampling_ratio):
+            narrower than one bin. Set M ≥ 2·ceil(β) where β is the BCDI
+            oversampling ratio (Detector.calculate_oversampling_ratio):
             the 2·β term ensures FFT bins are at least as fine as detector
-            pixels; the floor of 8 caps the bilinear interpolation error per
-            fringe to a few percent regardless of β.
+            pixels.
 
         Returns
         -------
