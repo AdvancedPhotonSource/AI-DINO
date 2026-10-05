@@ -1434,7 +1434,7 @@ _GRAD_CATEGORY = {
 _METHOD_LABELS = {'direct': 'Direct', 'fft': 'FFT'}
 
 _FACET_TITLES = {
-    'include_sublattice': {True: 'With sublattice', False: 'No sublattice'},
+    'include_sublattice': {True: 'Sublattice', False: 'Continuum'},
     'method': _METHOD_LABELS,
 }
 
